@@ -11,7 +11,7 @@
 #define IEEE80211_RTS 0x1b
 #define IEEE80211_CTS 0x1c
 
-#define PLCP_TIME 176
+#define PLCP_TIME 29
 
 typedef char macaddr[STR_MAC_ADDR_LEN];
 #define BROADCAST_MAC "FF:FF:FF:FF:FF:FF"
@@ -19,7 +19,7 @@ typedef char macaddr[STR_MAC_ADDR_LEN];
 
 struct packet {
     int type, rate, frmlen, number;
-    long timestamp;
+    long long timestamp;
     macaddr dst, src, bssid;
 };
 
@@ -34,15 +34,17 @@ void usage(void)
 void parse_line(char *line, struct packet *packet)
 {
     int i=0, pass=0, read_val = 1;
-    char *cur;
+    char *cur, *ptr;
 
-    for(cur = line; (cur - line) < 127; cur++) {
+    for(cur = line; (cur - line) < 127;) {
 	if(*cur == ',') {
 	    cur++;
 	    read_val = 1;
-	    if(*cur == ',' || *cur =='\n')
+	    if(*cur == ',')
 		read_val = 0;
 	}
+	if(*cur == '\n')
+	    break;
 	if(read_val) {
 	    switch(pass) {
 	    case 0:
@@ -51,14 +53,13 @@ void parse_line(char *line, struct packet *packet)
 		break;
 	    case 2:
 		/* Timestamp */
-		packet->timestamp = (long)strtol(cur, NULL, 0);
+		packet->timestamp = (long long)strtoll(cur, NULL, 0);
 		break;
 	    case 4:
 		if(is_prism)
-		    /* rate */
 		    packet->rate = (int)strtol(cur, NULL, 0);
 		else
-		    packet->rate = ((float)strtof(cur, NULL) * 2);
+		    packet->rate = ((float)strtof(cur, NULL) * 2.0);
 		break;
 	    case 5:
 		/* frmlen */
@@ -86,15 +87,20 @@ void parse_line(char *line, struct packet *packet)
 		break;
 	    default: break;
 	    }
-	    pass++;
 	    read_val = 0;
 	}
+	pass++;
+	ptr = strchr(cur, ',');
+	if(ptr)
+	    cur = ptr;
+	else
+	    break;
     }
 }
 
-inline long time_for(long frmlen, int rate)
+inline long long time_for(long frmlen, int rate)
 {
-    return (long)(((frmlen * 8) * 1024.0 * 1024.0)/(((double)rate/2) * 1000.0 * 1000.0));
+    return (long long)(((frmlen * 8) * 1024.0 * 1024.0)/(((double)rate/2) * 1000.0 * 1000.0));
 }
 
 inline int is_ackable(int type)
@@ -110,7 +116,7 @@ inline int is_ackable(int type)
 
 void dump_packet(struct packet *packet)
 {
-    printf("%d)\t%x\t%d\t%d\t%ld\t%s\t%s\t%s\n", packet->number, packet->type,
+    printf("%d)\t%x\t%d\t%d\t%lld\t%s\t%s\t%s\n", packet->number, packet->type,
 	   packet->rate, packet->frmlen, packet->timestamp,
 	   packet->dst, packet->src, packet->bssid);
 }
@@ -140,8 +146,6 @@ void calculate_sifs(char *input_file, macaddr mac, macaddr bssid)
 	parse_line(line, &packet);
 	packet.number = ++packet_number;
 
-	dump_packet(&packet);
-
 	if(STRING_EQUAL(BROADCAST_MAC, packet.dst, 17))
 	    continue;
 	if(packet.type == IEEE80211_DATA && !STRING_EQUAL(bssid, packet.bssid, 17))
@@ -153,12 +157,12 @@ void calculate_sifs(char *input_file, macaddr mac, macaddr bssid)
 	if(packet.type == IEEE80211_ACK) {
 	    if(STRING_EQUAL(old_packet.src, packet.dst, 17) ||
 	       STRING_EQUAL(old_packet.bssid, packet.dst, 17)) {
-		long timestamp_ack, timestamp_old;
+		long long timestamp_ack, timestamp_old;
 		//		printf("%d: Ack RECEIVER %s - Acks packet number %d (%d)--->\n", packet_number, packet.dst, old_packet.number, time_for(packet.frmlen, packet.rate));
 		timestamp_ack = packet.timestamp - time_for(packet.frmlen, packet.rate) - PLCP_TIME;
 		timestamp_old = old_packet.timestamp;
 		if(STRING_EQUAL(old_packet.dst, mac, 17))
-		    printf("%ld\n", timestamp_ack - timestamp_old);
+		    printf("%lld\n", timestamp_ack - timestamp_old);
 		//		printf("\t%d: DST %s BSSID %s SRC %s\n", old_packet.number, old_packet.dst, old_packet.bssid, old_packet.src);
 		//		printf("\t\tReceived within %ldus\n\n", timestamp_ack - timestamp_old);
 		memset(&old_packet, 0, sizeof(struct packet));
@@ -175,7 +179,30 @@ void calculate_sifs(char *input_file, macaddr mac, macaddr bssid)
 
 int is_valid(char *str)
 {
+    if(str[0] == 0)
+	return 0;
     return 1;
+}
+
+void read_clients(char *input_file)
+{
+    FILE *fp = NULL;
+    char line[128];
+
+    fp = fopen(input_file, "r+");
+    if(!fp) {
+	printf("Couldn't open input file");
+	exit(EXIT_FAILURE);
+    }
+    while(!feof(fp)) {
+	struct packet packet;
+
+	fgets(line, 128, fp);	
+	memset(&packet, 0, sizeof(struct packet));
+
+	parse_line(line, &packet);
+	
+    }
 }
 
 int main(int argc, char *argv[])
@@ -201,8 +228,10 @@ int main(int argc, char *argv[])
 	    break;
 	}
     }
-    if(!(is_valid(input_file) && is_valid(bssid) && is_valid(mac))) {
-	usage();
+    if(!is_valid(input_file))
+	return 0;
+    if(!is_valid(bssid) || !is_valid(mac)) {
+	read_clients(input_file);
 	return 0;
     }
     printf("mac - %s\t bssid - %s\n", mac, bssid);
